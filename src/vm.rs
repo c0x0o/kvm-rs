@@ -1,154 +1,168 @@
-use super::device::Device;
-use super::error::DeviceError;
-use errno::{errno, set_errno};
-use std::collections::BTreeMap;
+use crate::device::KvmDevice;
+use crate::error::{ConfigError, KvmError};
+use crate::mem::{MemorySlot, MemorySlotConfig};
+use crate::vcpu::{Vcpu, VcpuConfig};
+use libkvm;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::RwLock;
+
+pub struct VirtualMachineConfig {
+    vcpus: HashMap<i32, VcpuConfig>,
+    memory_slots: HashMap<i32, MemorySlotConfig>,
+}
+
+pub struct VirtualMachineBuilder {
+    device_fd: i32,
+    config: VirtualMachineConfig,
+}
+
+impl VirtualMachineBuilder {
+    pub fn new(device: &KvmDevice) -> Self {
+        Self {
+            device_fd: device.fd,
+            config: VirtualMachineConfig {
+                vcpus: Default::default(),
+                memory_slots: Default::default(),
+            },
+        }
+    }
+
+    pub fn add_vcpu(&mut self, vcpu: &VcpuConfig) -> Result<(), ConfigError> {
+        if self.config.vcpus.contains_key(&vcpu.id) {
+            return Err(ConfigError::VcpuExists(format!(
+                "vcpu at id {} already exists",
+                vcpu.id
+            )));
+        }
+
+        self.config.vcpus.insert(vcpu.id, *vcpu);
+
+        Ok(())
+    }
+
+    pub fn add_memory_slot(&mut self, slot: &MemorySlotConfig) -> Result<(), ConfigError> {
+        if self.config.memory_slots.contains_key(&slot.id) {
+            return Err(ConfigError::MemorySlotExists(format!(
+                "memory slot at id {} already exists",
+                slot.id
+            )));
+        }
+
+        self.config.memory_slots.insert(slot.id, *slot);
+
+        Ok(())
+    }
+
+    pub fn build(&self) -> Result<VirtualMachine, KvmError> {
+        // create vm
+        let vm_fd = unsafe {
+            let fd = libkvm::libkvm_vm_create(self.device_fd);
+            if fd < 0 {
+                return Err(KvmError::new("create vm fd failed"));
+            } else {
+                fd
+            }
+        };
+
+        // create vcpu
+        let mut vcpus = HashMap::new();
+        for (&id, &config) in self.config.vcpus.iter() {
+            let vcpu_fd = unsafe {
+                let fd = libkvm::libkvm_vcpu_create(vm_fd, config.id);
+                if fd < 0 {
+                    return Err(KvmError::new("create vcpu failed"));
+                } else {
+                    fd
+                }
+            };
+
+            vcpus.insert(
+                id,
+                Arc::new(RwLock::new(Vcpu {
+                    fd: vcpu_fd,
+                    config,
+                })),
+            );
+        }
+
+        // create memory slot
+        let mut memory_slots = HashMap::new();
+        for (&id, &config) in self.config.memory_slots.iter() {
+            let mut region = libkvm::kvm_userspace_memory_region {
+                slot: id as u32,
+                flags: 0,
+                guest_phys_addr: config.guest_location,
+                memory_size: config.size as u64,
+                userspace_addr: 0,
+            };
+            println!("{}", region.memory_size);
+
+            unsafe {
+                // mapping slot to HVA
+                if libkvm::libkvm_mem_create(
+                    &mut region as *mut libkvm::kvm_userspace_memory_region,
+                ) < 0
+                {
+                    return Err(KvmError::new("create memory slot failed"));
+                }
+
+                // add slot to vm
+                if libkvm::libkvm_vm_insert_mem(
+                    vm_fd,
+                    &mut region as *mut libkvm::kvm_userspace_memory_region,
+                ) < 0
+                {
+                    return Err(KvmError::new("insert memory slot to vm failed"));
+                }
+            }
+
+            memory_slots.insert(
+                id,
+                Arc::new(RwLock::new(MemorySlot {
+                    config,
+                    mem: region,
+                })),
+            );
+        }
+
+        Ok(VirtualMachine {
+            vcpus,
+            memory_slots,
+        })
+    }
+}
 
 pub struct VirtualMachine {
-    fd: i32,
-    memory_slots: BTreeMap<u32, libkvm::kvm_userspace_memory_region>,
-    vcpus: BTreeMap<u32, i32>,
+    vcpus: HashMap<i32, Arc<RwLock<Vcpu>>>,
+    memory_slots: HashMap<i32, Arc<RwLock<MemorySlot>>>,
 }
 
 impl VirtualMachine {
-    pub fn new(device: Device) -> Result<Self, DeviceError> {
-        let fd = unsafe { libkvm::libkvm_vm_create(device.fd) };
-
-        if fd < 0 {
-            Err(DeviceError::new("create vm failed"))
-        } else {
-            Ok(VirtualMachine {
-                fd,
-                memory_slots: Default::default(),
-                vcpus: Default::default(),
-            })
-        }
+    pub fn get_vcpu(&self, id: i32) -> Option<Arc<RwLock<Vcpu>>> {
+        self.vcpus.get(&id).cloned()
     }
 
-    pub fn add_memory_slot(&mut self, mem: &MemorySlot) -> Result<&mut Self, DeviceError> {
-        self.check_memory_conflict(mem)?;
-
-        let mut opaque_mem_slot = unsafe {
-            let mut opaque = libkvm::kvm_userspace_memory_region {
-                slot: mem.slot,
-                memory_size: mem.size,
-                guest_phys_addr: mem.guest_location,
-                flags: 0,
-                userspace_addr: 0,
-            };
-            if libkvm::libkvm_mem_create(&mut opaque as *mut libkvm::kvm_userspace_memory_region)
-                < 0
-            {
-                return Err(DeviceError::new("create vm memory failed"));
-            }
-            opaque
-        };
-
-        unsafe {
-            if libkvm::libkvm_vm_insert_mem(
-                self.fd,
-                &mut opaque_mem_slot as *mut libkvm::kvm_userspace_memory_region,
-            ) < 0
-            {
-                drop_memory_slot(&mut opaque_mem_slot);
-                Err(DeviceError::new("insert vm memory failed"))
-            } else {
-                self.memory_slots.insert(mem.slot, opaque_mem_slot);
-                Ok(self)
-            }
-        }
+    pub fn get_memory_slot(&self, id: i32) -> Option<Arc<RwLock<MemorySlot>>> {
+        self.memory_slots.get(&id).cloned()
     }
+    
+    pub fn load_to_guest_memory(&self, buffer: &mut [u8], location: u64) -> Result<(), KvmError> {
+        let mut begin: Option<i32> = None;
+        let mut end: Option<i32> = None;
 
-    pub fn add_new_vcpu(&mut self, vcpu: &Vcpu) -> Result<(), DeviceError> {
-        if self.vcpus.contains_key(&vcpu.id) {
-            return Err(DeviceError::with_errno("duplicate vcpu id", libc::EINVAL));
-        }
-
-        let vcpu_fd = unsafe {
-            let return_value = libkvm::libkvm_vcpu_create(self.fd, vcpu.id());
-            if return_value < 0 {
-                return Err(DeviceError::new("create vcpu failed"));
-            } else {
-                return_value
+        for (&id, mem) in self.memory_slots.iter() {
+            let slot = mem.read().unwrap();
+            if slot.mem.guest_phys_addr <= location {
+                begin = Some(id);
             }
-        };
-
-        self.vcpus.insert(vcpu.id, vcpu_fd);
-
-        Ok(())
-    }
-
-    pub fn set_vcpu_state(&mut self, vcpu_id: u32, state: &mut VcpuState) -> Result<(), DeviceError> {
-        let vcpu = if let Some(vcpu) = self.vcpus.get(&vcpu_id) {
-            *vcpu
-        } else {
-            return Err(DeviceError::with_errno("no such vcpu", libc::EINVAL));
-        };
-
-        unsafe {
-            if libkvm::libkvm_vcpu_set_regs(vcpu, &mut state.regs as *mut libkvm::kvm_regs) < 0 {
-                return Err(DeviceError::new("set vcpu sregs failed"));
-            }
-            if libkvm::libkvm_vcpu_set_sregs(vcpu, &mut state.sregs as *mut libkvm::kvm_sregs)
-                < 0
-            {
-                return Err(DeviceError::new("set vcpu regs failed"));
-            }
-        }
-        Ok(())
-    }
-
-    pub fn get_vcpu_state(&mut self, vcpu_id: u32) -> Result<VcpuState, DeviceError> {
-        let vcpu = if let Some(vcpu) = self.vcpus.get(&vcpu_id) {
-            *vcpu
-        } else {
-            return Err(DeviceError::with_errno("no such vcpu", libc::EINVAL));
-        };
-
-        let mut state = VcpuState::default();
-        unsafe {
-            if libkvm::libkvm_vcpu_get_regs(vcpu, &mut state.regs as *mut libkvm::kvm_regs) < 0 {
-                return Err(DeviceError::new("get vcpu sregs failed"));
-            }
-            if libkvm::libkvm_vcpu_get_sregs(vcpu, &mut state.sregs as *mut libkvm::kvm_sregs)
-                < 0
-            {
-                return Err(DeviceError::new("get vcpu regs failed"));
-            }
-        }
-        Ok(state)
-    }
-
-    pub fn run_vcpu(&mut self, vcpu_id: u32) -> Result<(), DeviceError> {
-        let vcpu = if let Some(vcpu) = self.vcpus.get(&vcpu_id) {
-            *vcpu
-        } else {
-            return Err(DeviceError::with_errno("no such vcpu", libc::EINVAL));
-        };
-
-        unsafe {
-            if libkvm::libkvm_vm_run(vcpu) < 0 {
-                return Err(DeviceError::new("error occured when running vcpu"));
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn load_image(&mut self, buffer: &mut [u8], location: u64) -> Result<(), DeviceError> {
-        let mut begin: Option<u32> = None;
-        let mut end: Option<u32> = None;
-
-        for (slot, mem) in self.memory_slots.iter() {
-            if mem.guest_phys_addr <= location {
-                begin = Some(*slot);
-            }
-            if mem.guest_phys_addr + mem.memory_size > location + buffer.len() as u64 {
-                end = Some(*slot);
+            if slot.mem.guest_phys_addr + slot.mem.memory_size > location + buffer.len() as u64 {
+                end = Some(id);
             }
         }
 
         if begin.is_none() {
-            return Err(DeviceError::with_errno(
+            return Err(KvmError::with_errno(
                 "no suitable memory slot found",
                 libc::EINVAL,
             ));
@@ -162,11 +176,12 @@ impl VirtualMachine {
         self.memory_slots
             .iter()
             .take_while(|(&slot, &_)| slot >= begin.unwrap() && slot <= end.unwrap())
-            .for_each(|(&_, &mem)| unsafe {
-                let size = (buffer.len() - current_start).min(mem.memory_size as usize);
+            .for_each(|(&_, mem)| unsafe {
+                let slot = mem.read().unwrap();
+                let size = (buffer.len() - current_start).min(slot.mem.memory_size as usize);
 
                 libc::memcpy(
-                    mem.userspace_addr as *mut libc::c_void,
+                    slot.mem.userspace_addr as *mut libc::c_void,
                     buffer[current_start..].as_mut_ptr() as *mut libc::c_void,
                     size,
                 );
@@ -174,102 +189,5 @@ impl VirtualMachine {
                 current_start += size;
             });
         return Ok(());
-    }
-
-    fn check_memory_conflict(&self, mem: &MemorySlot) -> Result<(), DeviceError> {
-        if self.memory_slots.contains_key(&mem.slot) {
-            return Err(DeviceError::with_errno(
-                "memory slot already in use",
-                libc::EINVAL,
-            ));
-        }
-
-        Ok(())
-    }
-}
-
-fn drop_memory_slot(opaque: &mut libkvm::kvm_userspace_memory_region) {
-    // "destroy" may change errno,
-    // so we need to store it
-    let old_errno = errno();
-    unsafe {
-        libkvm::libkvm_mem_destroy(opaque as *mut libkvm::kvm_userspace_memory_region);
-    }
-    // restore real errno
-    set_errno(old_errno);
-}
-
-impl Drop for VirtualMachine {
-    fn drop(&mut self) {
-        self.memory_slots
-            .iter_mut()
-            .for_each(|(_, opaque)| drop_memory_slot(opaque))
-    }
-}
-
-pub struct MemorySlot {
-    slot: u32,
-    size: u64,
-    guest_location: u64,
-}
-
-impl Default for MemorySlot {
-    fn default() -> Self {
-        MemorySlot {
-            slot: 0,
-            size: 0,
-            guest_location: 0,
-        }
-    }
-}
-
-impl MemorySlot {
-    pub fn slot(&mut self, i: u32) -> &mut Self {
-        self.slot = i;
-        self
-    }
-
-    pub fn size(&mut self, size: u64) -> &mut Self {
-        self.size = size;
-        self
-    }
-
-    pub fn guest_location(&mut self, loc: u64) -> &mut Self {
-        self.guest_location = loc;
-        self
-    }
-}
-
-pub struct Vcpu {
-    id: u32,
-}
-
-impl Vcpu {
-    pub fn new(id: u32) -> Self {
-        return Vcpu { id };
-    }
-    
-    pub fn id(&self) -> u32 {
-        self.id
-    }
-}
-
-pub struct VcpuState {
-    pub regs: libkvm::kvm_regs,
-    pub sregs: libkvm::kvm_sregs,
-}
-
-impl Default for VcpuState {
-    fn default() -> Self {
-        Self {
-            regs: Default::default(),
-            sregs: Default::default(),
-        }
-    }
-}
-
-impl VcpuState {
-    pub fn new() -> Self {
-        Default::default()
     }
 }

@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include "platform.h"
 
@@ -22,8 +23,9 @@ int libkvm_vm_insert_mem(int vm_fd, struct kvm_userspace_memory_region *mem) {
 }
 
 int libkvm_mem_create(struct kvm_userspace_memory_region *mem) {
-  void *user_space_mm = mmap(NULL, mem->memory_size, PROT_EXEC | PROT_READ | PROT_WRITE,
-                             MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+  void *user_space_mm =
+      mmap(NULL, mem->memory_size, PROT_EXEC | PROT_READ | PROT_WRITE,
+           MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
   if (user_space_mm == MAP_FAILED) {
     return -1;
   }
@@ -36,28 +38,28 @@ int libkvm_mem_destroy(struct kvm_userspace_memory_region *mem) {
   return munmap((void *)mem->userspace_addr, mem->memory_size);
 }
 
-int libkvm_vcpu_create(int vm, uint32_t vcpu) {
-	return ioctl(vm, KVM_CREATE_VCPU, vcpu);
+int libkvm_vcpu_create(int vm, int vcpu_id) {
+  return ioctl(vm, KVM_CREATE_VCPU, vcpu_id);
 }
 
-int libkvm_vcpu_get_regs(int vm, struct kvm_regs *regs) {
-	return ioctl(vm, KVM_GET_REGS, regs);
+int libkvm_vcpu_destroy(int vcpu) { return close(vcpu); }
+
+int libkvm_vcpu_get_regs(int vcpu, struct kvm_regs *regs) {
+  return ioctl(vcpu, KVM_GET_REGS, regs);
 }
 
-int libkvm_vcpu_set_regs(int vm, struct kvm_regs *regs) {
-	return ioctl(vm, KVM_SET_REGS, regs);
+int libkvm_vcpu_set_regs(int vcpu, struct kvm_regs *regs) {
+  return ioctl(vcpu, KVM_SET_REGS, regs);
 }
 
-int libkvm_vcpu_get_sregs(int vm, struct kvm_sregs *sregs) {
-	return ioctl(vm, KVM_GET_SREGS, sregs);
+int libkvm_vcpu_get_sregs(int vcpu, struct kvm_sregs *sregs) {
+  return ioctl(vcpu, KVM_GET_SREGS, sregs);
 }
 
-int libkvm_vcpu_set_sregs(int vm, struct kvm_sregs *sregs) {
-	return ioctl(vm, KVM_SET_SREGS, sregs);
+int libkvm_vcpu_set_sregs(int vcpu, struct kvm_sregs *sregs) {
+  return ioctl(vcpu, KVM_SET_SREGS, sregs);
 }
 
-int libkvm_vm_run(int vm) {
-	return ioctl(vm, KVM_RUN, NULL);
-}
+int libkvm_vm_run(int vcpu) { return ioctl(vcpu, KVM_RUN, NULL); }
 
 #endif

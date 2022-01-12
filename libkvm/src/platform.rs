@@ -738,7 +738,7 @@ extern "C" {
     pub fn libkvm_vm_create(device: ::std::os::raw::c_int) -> ::std::os::raw::c_int;
 }
 extern "C" {
-    pub fn libkvm_vm_run(vm: ::std::os::raw::c_int) -> ::std::os::raw::c_int;
+    pub fn libkvm_vm_run(vcpu: ::std::os::raw::c_int) -> ::std::os::raw::c_int;
 }
 extern "C" {
     pub fn libkvm_vm_insert_mem(
@@ -753,29 +753,35 @@ extern "C" {
     pub fn libkvm_mem_destroy(mem: *mut kvm_userspace_memory_region) -> ::std::os::raw::c_int;
 }
 extern "C" {
-    pub fn libkvm_vcpu_create(vm: ::std::os::raw::c_int, vcpu: u32) -> ::std::os::raw::c_int;
+    pub fn libkvm_vcpu_create(
+        vm: ::std::os::raw::c_int,
+        vcpu_id: ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int;
+}
+extern "C" {
+    pub fn libkvm_vcpu_destroy(vcpu: ::std::os::raw::c_int) -> ::std::os::raw::c_int;
 }
 extern "C" {
     pub fn libkvm_vcpu_get_regs(
-        vm: ::std::os::raw::c_int,
+        vcpu: ::std::os::raw::c_int,
         regs: *mut kvm_regs,
     ) -> ::std::os::raw::c_int;
 }
 extern "C" {
     pub fn libkvm_vcpu_set_regs(
-        vm: ::std::os::raw::c_int,
+        vcpu: ::std::os::raw::c_int,
         regs: *mut kvm_regs,
     ) -> ::std::os::raw::c_int;
 }
 extern "C" {
     pub fn libkvm_vcpu_get_sregs(
-        vm: ::std::os::raw::c_int,
+        vcpu: ::std::os::raw::c_int,
         sregs: *mut kvm_sregs,
     ) -> ::std::os::raw::c_int;
 }
 extern "C" {
     pub fn libkvm_vcpu_set_sregs(
-        vm: ::std::os::raw::c_int,
+        vcpu: ::std::os::raw::c_int,
         sregs: *mut kvm_sregs,
     ) -> ::std::os::raw::c_int;
 }

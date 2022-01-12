@@ -1,12 +1,12 @@
 use libc;
 
 #[derive(Clone, Debug)]
-pub struct DeviceError {
+pub struct KvmError {
     hint: &'static str,
     errno: i32,
 }
 
-impl std::fmt::Display for DeviceError {
+impl std::fmt::Display for KvmError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let errno = unsafe {
             let mut msg: [u8; 64] = [0; 64];
@@ -17,15 +17,34 @@ impl std::fmt::Display for DeviceError {
     }
 }
 
-impl DeviceError {
-    pub fn new(hint: &'static str) -> DeviceError {
-        DeviceError {
+impl KvmError {
+    pub fn new(hint: &'static str) -> KvmError {
+        KvmError {
             hint,
             errno: errno::errno().0,
         }
     }
 
-    pub fn with_errno(hint: &'static str, err: i32) -> DeviceError {
-        DeviceError { hint, errno: err }
+    pub fn with_errno(hint: &'static str, err: i32) -> KvmError {
+        KvmError { hint, errno: err }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ConfigError {
+    VcpuExists(String),
+    MemorySlotExists(String),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::VcpuExists(e) => {
+                write!(f, "[ConfigError][VcpuExists] {}", e)
+            }
+            Self::MemorySlotExists(e) => {
+                write!(f, "[ConfigError][MemorySlotExists] {}", e)
+            }
+        }
     }
 }
