@@ -34,14 +34,28 @@ impl VcpuConfigBuilder {
 }
 
 pub struct Vcpu {
+    pub(crate) kvm_run: *mut libkvm::kvm_run,
+    pub(crate) kvm_run_mmap_size: i32,
     pub(crate) fd: i32,
     pub(crate) config: VcpuConfig,
+}
+
+impl Default for Vcpu {
+    fn default() -> Self {
+        Self {
+            kvm_run: unsafe { std::mem::zeroed() },
+            kvm_run_mmap_size: 0,
+            fd: -1,
+            config: Default::default(),
+        }
+    }
 }
 
 impl Drop for Vcpu {
     fn drop(&mut self) {
         unsafe {
             libkvm::libkvm_vcpu_destroy(self.fd);
+            libkvm::libkvm_vcpu_kvm_run_destroy(self.kvm_run, self.kvm_run_mmap_size);
         }
     }
 }
@@ -51,17 +65,18 @@ impl Vcpu {
         return self.config.id;
     }
 
-    pub fn run(&self) -> Result<(), KvmError> {
+    pub fn run(&self) -> Result<KvmRun, KvmError> {
         let ret = unsafe { libkvm::libkvm_vm_run(self.fd) };
-
         if ret < 0 {
             return Err(KvmError::new("unexpected kvm exited"));
         }
 
-        Ok(())
+        Ok(KvmRun {
+            kvm_run: self.kvm_run
+        })
     }
 
-    pub fn get_state(&self) -> Result<VcpuState, KvmError> {
+    pub fn state(&self) -> Result<VcpuState, KvmError> {
         let mut state = VcpuState::default();
         unsafe {
             if libkvm::libkvm_vcpu_get_regs(self.fd, &mut state.regs as *mut libkvm::kvm_regs) < 0 {
@@ -101,6 +116,54 @@ impl Default for VcpuState {
         Self {
             regs: Default::default(),
             sregs: Default::default(),
+        }
+    }
+}
+
+pub enum KvmExitReason {
+    LibUnhandle,
+    Unknown(u64),
+    IO {
+        // 0 stands for input, 1 stands for output
+        direction: u8,
+        size: u8,
+        port: u16,
+        count: u32,
+        data: Vec<u8>,
+    },
+}
+
+pub struct KvmRun {
+    pub(crate) kvm_run: *mut libkvm::kvm_run,
+}
+
+impl KvmRun {
+    pub fn exit_reason(&self) -> KvmExitReason {
+        let run = unsafe { *self.kvm_run };
+        match run.exit_reason {
+            libkvm::KVM_EXIT_IO => {
+                let data_size = unsafe { run.__bindgen_anon_1.io.size as usize };
+                let offset = unsafe { run.__bindgen_anon_1.io.data_offset as usize };
+                let mut data = Vec::with_capacity(data_size);
+                let mut begin = unsafe {(self.kvm_run as *mut u8).add(offset)};
+                for _ in 0..data_size {
+                    data.push(unsafe { *begin });
+                    unsafe {
+                        begin = begin.add(1);
+                    }
+                }
+
+                unsafe {
+                    KvmExitReason::IO {
+                        direction: run.__bindgen_anon_1.io.direction,
+                        size: run.__bindgen_anon_1.io.size,
+                        port: run.__bindgen_anon_1.io.port,
+                        count: run.__bindgen_anon_1.io.count,
+                        data,
+                    }
+                }
+            }
+            _ => KvmExitReason::LibUnhandle,
         }
     }
 }

@@ -7,13 +7,18 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <stdio.h>
 
 #include "platform.h"
 
 int libkvm_open() { return open("/dev/kvm", O_RDWR); }
 
-int libkvm_get_api_version(int kvm_fd) {
+int libkvm_dev_get_api_version(int kvm_fd) {
   return ioctl(kvm_fd, KVM_GET_API_VERSION, NULL);
+}
+
+int libkvm_dev_get_kvm_run_mmap_size(int device) {
+  return ioctl(device, KVM_GET_VCPU_MMAP_SIZE, NULL);
 }
 
 int libkvm_vm_create(int kvm_fd) { return ioctl(kvm_fd, KVM_CREATE_VM, 0); }
@@ -60,6 +65,21 @@ int libkvm_vcpu_set_sregs(int vcpu, struct kvm_sregs *sregs) {
   return ioctl(vcpu, KVM_SET_SREGS, sregs);
 }
 
+int libkvm_vcpu_kvm_run_create(int vcpu, struct kvm_run **result, int run_size) {
+  *result = mmap(NULL, run_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, vcpu, 0);
+  if (*result == MAP_FAILED) {
+    return -1;
+  }
+
+  return 0;
+}
+
+int libkvm_vcpu_kvm_run_destroy(struct kvm_run *run, int run_size) {
+  return munmap(run, run_size);
+}
+
 int libkvm_vm_run(int vcpu) { return ioctl(vcpu, KVM_RUN, NULL); }
+
+int libkvm_vm_create_irqchip(int vcpu) { return ioctl(vcpu, KVM_CREATE_IRQCHIP, NULL); }
 
 #endif

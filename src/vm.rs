@@ -4,6 +4,7 @@ use crate::mem::{MemorySlot, MemorySlotConfig};
 use crate::vcpu::{Vcpu, VcpuConfig};
 use libkvm;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -13,14 +14,14 @@ pub struct VirtualMachineConfig {
 }
 
 pub struct VirtualMachineBuilder {
-    device_fd: i32,
+    device: Rc<KvmDevice>,
     config: VirtualMachineConfig,
 }
 
 impl VirtualMachineBuilder {
-    pub fn new(device: &KvmDevice) -> Self {
+    pub fn new(device: &Rc<KvmDevice>) -> Self {
         Self {
-            device_fd: device.fd,
+            device: Rc::clone(device),
             config: VirtualMachineConfig {
                 vcpus: Default::default(),
                 memory_slots: Default::default(),
@@ -57,13 +58,20 @@ impl VirtualMachineBuilder {
     pub fn build(&self) -> Result<VirtualMachine, KvmError> {
         // create vm
         let vm_fd = unsafe {
-            let fd = libkvm::libkvm_vm_create(self.device_fd);
+            let fd = libkvm::libkvm_vm_create(self.device.fd);
             if fd < 0 {
                 return Err(KvmError::new("create vm fd failed"));
             } else {
                 fd
             }
         };
+        
+        // create irq chip
+        unsafe {
+            if libkvm::libkvm_vm_create_irqchip(vm_fd) < 0 {
+                return Err(KvmError::new("create irq chip failed"));
+            }
+        }
 
         // create vcpu
         let mut vcpus = HashMap::new();
@@ -77,11 +85,27 @@ impl VirtualMachineBuilder {
                 }
             };
 
+            // mmap kvm run
+            let mut kvm_run: *mut libkvm::kvm_run = unsafe { std::mem::zeroed() };
+            unsafe {
+                if libkvm::libkvm_vcpu_kvm_run_create(
+                    vcpu_fd,
+                    &mut kvm_run as *mut *mut libkvm::kvm_run,
+                    self.device.kvm_run_mmap_size,
+                ) < 0
+                {
+                    return Err(KvmError::new("create kvm_run mmaping failed"));
+                }
+            }
+
             vcpus.insert(
                 id,
                 Arc::new(RwLock::new(Vcpu {
+                    kvm_run,
+                    kvm_run_mmap_size: self.device.kvm_run_mmap_size,
                     fd: vcpu_fd,
                     config,
+                    ..Default::default()
                 })),
             );
         }
@@ -96,7 +120,6 @@ impl VirtualMachineBuilder {
                 memory_size: config.size as u64,
                 userspace_addr: 0,
             };
-            println!("{}", region.memory_size);
 
             unsafe {
                 // mapping slot to HVA
@@ -139,14 +162,14 @@ pub struct VirtualMachine {
 }
 
 impl VirtualMachine {
-    pub fn get_vcpu(&self, id: i32) -> Option<Arc<RwLock<Vcpu>>> {
+    pub fn vcpu(&self, id: i32) -> Option<Arc<RwLock<Vcpu>>> {
         self.vcpus.get(&id).cloned()
     }
 
-    pub fn get_memory_slot(&self, id: i32) -> Option<Arc<RwLock<MemorySlot>>> {
+    pub fn memory_slot(&self, id: i32) -> Option<Arc<RwLock<MemorySlot>>> {
         self.memory_slots.get(&id).cloned()
     }
-    
+
     pub fn load_to_guest_memory(&self, buffer: &mut [u8], location: u64) -> Result<(), KvmError> {
         let mut begin: Option<i32> = None;
         let mut end: Option<i32> = None;
@@ -185,7 +208,7 @@ impl VirtualMachine {
                     buffer[current_start..].as_mut_ptr() as *mut libc::c_void,
                     size,
                 );
-                
+
                 current_start += size;
             });
         return Ok(());

@@ -13,6 +13,8 @@ pub use vcpu::VcpuConfig;
 pub use vcpu::VcpuConfigBuilder;
 pub use vcpu::Vcpu;
 pub use vcpu::VcpuState;
+pub use vcpu::KvmRun;
+pub use vcpu::KvmExitReason;
 
 pub use mem::MemorySlotConfig;
 pub use mem::MemorySlotConfigBuilder;

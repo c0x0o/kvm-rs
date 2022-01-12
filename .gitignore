@@ -1,4 +1,5 @@
 /target
+/libkvm/src/platform.rs
 *.bin
 *.elf
 *.o

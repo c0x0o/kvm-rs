@@ -1,4 +1,6 @@
-use kvm_rs::{KvmDevice, MemorySlotConfigBuilder, VcpuConfigBuilder, VirtualMachineBuilder};
+use kvm_rs::{
+    KvmDevice, KvmExitReason, MemorySlotConfigBuilder, VcpuConfigBuilder, VirtualMachineBuilder,
+};
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -28,15 +30,32 @@ fn main() {
     vcpu0_state.regs.rip = 0x0;
     vcpu0_state.regs.rflags = 0x2;
     vcpu0.read().unwrap().set_state(&mut vcpu0_state).unwrap();
-    
+
     println!("Loading image...");
     let args: Vec<String> = env::args().collect();
     let mut file = fs::read(Path::new(&args.get(1).unwrap())).unwrap();
     vm.load_to_guest_memory(file.as_mut(), 0x1000 << 4).unwrap();
 
-    println!("Booting vm...");
+    println!("vm start running...");
     loop {
-        vcpu0.read().unwrap().run().unwrap();
-        println!("vcpu0 interrupted");
+        let run = vcpu0.read().unwrap().run().unwrap();
+        match run.exit_reason() {
+            KvmExitReason::IO {
+                direction,
+                size,
+                port,
+                count,
+                data,
+            } => {
+                println!(
+                    "dir={}, size={}, port={}, count={}, data={:?}",
+                    direction, size, port, count, data
+                );
+            }
+            _ => {
+                println!("unexpected reason");
+                break;
+            }
+        }
     }
 }

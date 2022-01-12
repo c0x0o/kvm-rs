@@ -11,6 +11,7 @@ fn main() {
     let bindings = bindgen::Builder::default()
         .header("src/platform.h")
         .allowlist_type("libkvm_.*")
+        .allowlist_var("KVM_EXIT_.*")
         .allowlist_function("libkvm_.+")
         .blocklist_type(".*uint.*")
         .generate()
