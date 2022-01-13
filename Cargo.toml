@@ -10,5 +10,7 @@ libc = "^0.2.0"
 errno = "^0.2.8"
 libkvm = { path = "./libkvm" }
 
+[dev-dependencies]
+
 [workspace]
 members = ["libkvm"]

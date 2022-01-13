@@ -1,4 +1,6 @@
 use crate::error::{ConfigError, KvmError};
+use errno;
+use libc;
 use libkvm;
 
 #[derive(Clone, Copy)]
@@ -40,6 +42,9 @@ pub struct Vcpu {
     pub(crate) config: VcpuConfig,
 }
 
+unsafe impl Send for Vcpu {}
+unsafe impl Sync for Vcpu {}
+
 impl Default for Vcpu {
     fn default() -> Self {
         Self {
@@ -65,14 +70,15 @@ impl Vcpu {
         return self.config.id;
     }
 
-    pub fn run(&self) -> Result<KvmRun, KvmError> {
+    pub fn run(&mut self) -> Result<KvmRun, KvmError> {
         let ret = unsafe { libkvm::libkvm_vm_run(self.fd) };
         if ret < 0 {
             return Err(KvmError::new("unexpected kvm exited"));
         }
 
         Ok(KvmRun {
-            kvm_run: self.kvm_run
+            errno: errno::errno().0,
+            kvm_run: self.kvm_run,
         })
     }
 
@@ -120,12 +126,49 @@ impl Default for VcpuState {
     }
 }
 
+impl VcpuState {
+    pub fn get_common_registers_string(&self) -> String {
+        format!(
+            "RAX={:#x} RBX={:#x} RCX={:#x} RDX={:#x} RSI={:#x} RDI={:#x} \
+                RSP={:#x} RBP={:#x} \
+                R8={:#x} R9={:#x} R10={:#x} R11={:#x} R12={:#x} R13={:#x} R14={:#x} R15={:#x} \
+                RIP={:#x} RFLAGS={:#x}",
+            self.regs.rax,
+            self.regs.rbx,
+            self.regs.rcx,
+            self.regs.rdx,
+            self.regs.rsi,
+            self.regs.rdi,
+            self.regs.rsp,
+            self.regs.rbp,
+            self.regs.r8,
+            self.regs.r9,
+            self.regs.r10,
+            self.regs.r11,
+            self.regs.r12,
+            self.regs.r13,
+            self.regs.r14,
+            self.regs.r15,
+            self.regs.rip,
+            self.regs.rflags
+        )
+    }
+}
+
 pub enum KvmExitReason {
+    // non-KVM Exit Reason
+    SystemIntrrupt,
     LibUnhandle,
+
+    // KVM Exit Reason
     Unknown(u64),
-    IO {
-        // 0 stands for input, 1 stands for output
-        direction: u8,
+    Input {
+        offset: u64,
+        size: u8,
+        port: u16,
+        count: u32,
+    },
+    Output {
         size: u8,
         port: u16,
         count: u32,
@@ -134,18 +177,23 @@ pub enum KvmExitReason {
 }
 
 pub struct KvmRun {
+    pub(crate) errno: i32,
     pub(crate) kvm_run: *mut libkvm::kvm_run,
 }
 
 impl KvmRun {
     pub fn exit_reason(&self) -> KvmExitReason {
+        if self.errno == libc::EINTR {
+            return KvmExitReason::SystemIntrrupt;
+        }
+
         let run = unsafe { *self.kvm_run };
         match run.exit_reason {
             libkvm::KVM_EXIT_IO => {
                 let data_size = unsafe { run.__bindgen_anon_1.io.size as usize };
                 let offset = unsafe { run.__bindgen_anon_1.io.data_offset as usize };
                 let mut data = Vec::with_capacity(data_size);
-                let mut begin = unsafe {(self.kvm_run as *mut u8).add(offset)};
+                let mut begin = unsafe { (self.kvm_run as *mut u8).add(offset) };
                 for _ in 0..data_size {
                     data.push(unsafe { *begin });
                     unsafe {
@@ -154,16 +202,32 @@ impl KvmRun {
                 }
 
                 unsafe {
-                    KvmExitReason::IO {
-                        direction: run.__bindgen_anon_1.io.direction,
-                        size: run.__bindgen_anon_1.io.size,
-                        port: run.__bindgen_anon_1.io.port,
-                        count: run.__bindgen_anon_1.io.count,
-                        data,
+                    match run.__bindgen_anon_1.io.direction as u32 {
+                        libkvm::KVM_EXIT_IO_IN => KvmExitReason::Input {
+                            offset: run.__bindgen_anon_1.io.data_offset,
+                            size: run.__bindgen_anon_1.io.size,
+                            port: run.__bindgen_anon_1.io.port,
+                            count: run.__bindgen_anon_1.io.count,
+                        },
+                        libkvm::KVM_EXIT_IO_OUT => KvmExitReason::Output {
+                            size: run.__bindgen_anon_1.io.size,
+                            port: run.__bindgen_anon_1.io.port,
+                            count: run.__bindgen_anon_1.io.count,
+                            data,
+                        },
+                        _ => KvmExitReason::LibUnhandle,
                     }
                 }
             }
             _ => KvmExitReason::LibUnhandle,
         }
+    }
+
+    pub fn write_output_data(&mut self, offset: u64, data: &[u8]) {
+        let mut begin = unsafe { (self.kvm_run as *mut u8).add(offset as usize) };
+        data.iter().for_each(|byte| unsafe {
+            *begin = *byte;
+            begin = begin.add(1);
+        })
     }
 }

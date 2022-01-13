@@ -65,7 +65,7 @@ impl VirtualMachineBuilder {
                 fd
             }
         };
-        
+
         // create irq chip
         unsafe {
             if libkvm::libkvm_vm_create_irqchip(vm_fd) < 0 {
@@ -150,6 +150,7 @@ impl VirtualMachineBuilder {
         }
 
         Ok(VirtualMachine {
+            fd: vm_fd,
             vcpus,
             memory_slots,
         })
@@ -157,6 +158,7 @@ impl VirtualMachineBuilder {
 }
 
 pub struct VirtualMachine {
+    fd: i32,
     vcpus: HashMap<i32, Arc<RwLock<Vcpu>>>,
     memory_slots: HashMap<i32, Arc<RwLock<MemorySlot>>>,
 }
@@ -170,45 +172,58 @@ impl VirtualMachine {
         self.memory_slots.get(&id).cloned()
     }
 
+    pub fn raise_irq(&self, irq: i32) -> Result<(), KvmError> {
+        if unsafe { libkvm::libkvm_vm_set_irq_line_level(self.fd, irq, 0) } < 0 {
+            return Err(KvmError::new("set irq to 0 failed when raising interrupt"));
+        }
+
+        if unsafe { libkvm::libkvm_vm_set_irq_line_level(self.fd, irq, 1) } < 0 {
+            return Err(KvmError::new("set irq to 1 failed when raising interrupt"));
+        }
+
+        Ok(())
+    }
+
     pub fn load_to_guest_memory(&self, buffer: &mut [u8], location: u64) -> Result<(), KvmError> {
-        let mut begin: Option<i32> = None;
-        let mut end: Option<i32> = None;
+        let mem_end = location + (buffer.len() as u64);
 
-        for (&id, mem) in self.memory_slots.iter() {
-            let slot = mem.read().unwrap();
-            if slot.mem.guest_phys_addr <= location {
-                begin = Some(id);
+        // fast path
+        if let Some((_, slot_lock)) = self.memory_slots.iter().last() {
+            let slot = slot_lock.read().unwrap();
+            if slot.guest_location() + (slot.size() as u64) < location + (buffer.len() as u64) {
+                return Err(KvmError::with_errno("no available slot", libc::EINVAL));
             }
-            if slot.mem.guest_phys_addr + slot.mem.memory_size > location + buffer.len() as u64 {
-                end = Some(id);
-            }
-        }
-
-        if begin.is_none() {
-            return Err(KvmError::with_errno(
-                "no suitable memory slot found",
-                libc::EINVAL,
-            ));
-        }
-
-        if end.is_none() {
-            end = begin;
+        } else {
+            return Err(KvmError::with_errno("no available slot", libc::EINVAL));
         }
 
         let mut current_start = 0;
+        let mut start_point = location as usize;
         self.memory_slots
             .iter()
-            .take_while(|(&slot, &_)| slot >= begin.unwrap() && slot <= end.unwrap())
-            .for_each(|(&_, mem)| unsafe {
+            .take_while(|(_, slot_lock)| -> bool {
+                let slot = slot_lock.read().unwrap();
+                let slot_start = slot.guest_location();
+                let slot_end = slot.guest_location() + (slot.size() as u64);
+
+                // start point in the region
+                slot_start >= location && slot_start < mem_end
+                    // end point in the region
+                    || slot_end > location && slot_end <= mem_end
+                    // slot contains the  region
+                    || slot_start <= location && slot_end >= mem_end
+            })
+            .for_each(|(_, mem)| unsafe {
                 let slot = mem.read().unwrap();
                 let size = (buffer.len() - current_start).min(slot.mem.memory_size as usize);
 
                 libc::memcpy(
-                    slot.mem.userspace_addr as *mut libc::c_void,
+                    (slot.mem.userspace_addr as *mut libc::c_void).add(start_point),
                     buffer[current_start..].as_mut_ptr() as *mut libc::c_void,
                     size,
                 );
 
+                start_point -= start_point;
                 current_start += size;
             });
         return Ok(());

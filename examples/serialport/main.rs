@@ -4,6 +4,8 @@ use kvm_rs::{
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::thread;
+use std::time;
 
 fn main() {
     println!("Start initializing vm...");
@@ -35,27 +37,63 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut file = fs::read(Path::new(&args.get(1).unwrap())).unwrap();
     vm.load_to_guest_memory(file.as_mut(), 0x1000 << 4).unwrap();
+    
+    println!("{:?}", vm.memory_slot(0).unwrap().read().unwrap().inspect_memory_area(0x1000<<4, 128).unwrap());
 
     println!("vm start running...");
-    loop {
-        let run = vcpu0.read().unwrap().run().unwrap();
-        match run.exit_reason() {
-            KvmExitReason::IO {
-                direction,
-                size,
-                port,
-                count,
-                data,
-            } => {
-                println!(
-                    "dir={}, size={}, port={}, count={}, data={:?}",
-                    direction, size, port, count, data
-                );
-            }
-            _ => {
-                println!("unexpected reason");
-                break;
+    let handler = thread::spawn(move || {
+        let mut last_received: u8 = 0;
+        loop {
+            let mut run = vcpu0.write().unwrap().run().unwrap();
+            match run.exit_reason() {
+                KvmExitReason::Output {
+                    size,
+                    port,
+                    count,
+                    data,
+                } => {
+                    println!(
+                        "Output Exited: size={}, port={}, count={}, data={:?}",
+                        size, port, count, data
+                    );
+                    println!("{}", vcpu0.read().unwrap().state().unwrap().get_common_registers_string());
+                    // rust panics when integer overflow, use wrapping_add
+                    // to avoid this
+                    // ignore ICW from 8259A PIC main port
+                    if port == 0x3f8 {
+                        last_received = data[0].wrapping_add(1);
+ 
+                    // we sleep 1 sec to imitate the device processing the data
+                    thread::sleep(time::Duration::from_secs(1));
+                    
+                    // notify the guest that response is ready
+                    if let Err(e) = vm.raise_irq(4) {
+                        println!("{}", e);
+                        break;
+                    }
+                   }
+                }
+                KvmExitReason::Input {
+                    size,
+                    port,
+                    count,
+                    offset,
+                } => {
+                    println!(
+                        "Input Exited: size={}, port={}, count={}, offset={}",
+                        size, port, count, offset
+                    );
+                    run.write_output_data(offset, &[last_received]);
+                }
+                KvmExitReason::SystemIntrrupt => {
+                    println!("System INTR Exited")
+                }
+                _ => {
+                    println!("Unexpected Exited");
+                    break;
+                }
             }
         }
-    }
+    });
+    handler.join().expect("could not join thread");
 }

@@ -36,7 +36,7 @@ fn main() {
 
     println!("Booting vm...");
     loop {
-        vcpu0.read().unwrap().run().unwrap();
+        vcpu0.write().unwrap().run().unwrap();
         println!("vcpu0 interrupted");
     }
 }

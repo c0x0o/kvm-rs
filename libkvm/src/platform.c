@@ -82,4 +82,14 @@ int libkvm_vm_run(int vcpu) { return ioctl(vcpu, KVM_RUN, NULL); }
 
 int libkvm_vm_create_irqchip(int vcpu) { return ioctl(vcpu, KVM_CREATE_IRQCHIP, NULL); }
 
+int libkvm_vm_set_irq_line_level(int vm, int irq, int level) {
+	struct kvm_irq_level lv = {
+		{
+			.irq = irq,
+		},
+		.level = level,
+	};
+	return ioctl(vm, KVM_IRQ_LINE, &lv);
+}
+
 #endif
